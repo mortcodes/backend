@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using System.Text.Json;
 using HexGame.API.Data;
 using HexGame.API.Models;
@@ -410,8 +411,27 @@ namespace HexGame.API.Services
             // Get all characters for this game
             var allCharacters = game.Players.SelectMany(p => p.Characters).ToList();
             
-            // Filter to only show hexes that have been explored by this player
+            // Get hexes that have been explored by this player
             var exploredHexes = game.Hexes.Where(h => h.ExploredBy.Contains(player.Id)).ToList();
+            
+            // Find unexplored but adjacent hexes (for fog of war effect)
+            var visibleUnexploredHexes = new List<Hex>();
+            foreach (var exploredHex in exploredHexes)
+            {
+                // Find all unexplored hexes adjacent to each explored hex
+                var adjacentHexes = game.Hexes.Where(h => 
+                    !h.ExploredBy.Contains(player.Id) && // Not explored by this player
+                    IsAdjacent(exploredHex.Q, exploredHex.R, h.Q, h.R) // Adjacent to an explored hex
+                ).ToList();
+                
+                // Add them to our visible unexplored hexes list
+                visibleUnexploredHexes.AddRange(adjacentHexes);
+            }
+            
+            // Combine explored hexes with visible unexplored ones, removing duplicates
+            var allVisibleHexes = exploredHexes
+                .Union(visibleUnexploredHexes, new HexCoordinateComparer())
+                .ToList();
             
             // Get active battle if any
             var activeBattle = _gameRepository.GetActiveBattleAsync(game.Id).GetAwaiter().GetResult();
@@ -469,7 +489,7 @@ namespace HexGame.API.Services
                 MaxMovementPoints = c.MaxMovementPoints
             }).ToList();
 
-            var hexDtos = exploredHexes.Select(h => new HexDto
+            var hexDtos = allVisibleHexes.Select(h => new HexDto
             {
                 Id = h.Id,
                 GameId = h.GameId,
@@ -550,8 +570,9 @@ namespace HexGame.API.Services
             int s1 = -q1 - r1;
             int s2 = -q2 - r2;
 
-            // Calculate distance
-            return (Math.Abs(q1 - q2) + Math.Abs(r1 - r2) + Math.Abs(s1 - s2)) / 2 == 1;
+            // Calculate distance using the cube coordinate distance formula
+            int distance = (Math.Abs(q1 - q2) + Math.Abs(r1 - r2) + Math.Abs(s1 - s2)) / 2;
+            return distance == 1; // Adjacent hexes are exactly 1 unit away
         }
 
         private void ApplyBattleCardEffect(Battle battle, Card card, string playerId)
@@ -729,6 +750,21 @@ namespace HexGame.API.Services
                 
                 await _gameRepository.AddCardAsync(card);
             }
+        }
+    }
+
+    public class HexCoordinateComparer : IEqualityComparer<Hex>
+    {
+        public bool Equals(Hex x, Hex y)
+        {
+            if (ReferenceEquals(x, y)) return true;
+            if (ReferenceEquals(x, null) || ReferenceEquals(y, null)) return false;
+            return x.Q == y.Q && x.R == y.R;
+        }
+
+        public int GetHashCode(Hex obj)
+        {
+            return HashCode.Combine(obj.Q, obj.R);
         }
     }
 }
