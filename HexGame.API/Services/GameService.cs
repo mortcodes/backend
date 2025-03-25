@@ -1,3 +1,4 @@
+using System.Text.Json;
 using HexGame.API.Data;
 using HexGame.API.Models;
 using HexGame.API.Models.DTOs;
@@ -507,7 +508,7 @@ namespace HexGame.API.Services
                 };
             }
 
-            return new GameStateResponse
+            var gsr = new GameStateResponse
             {
                 GameId = game.Id,
                 NumberOfPlayers = game.NumberOfPlayers,
@@ -522,6 +523,9 @@ namespace HexGame.API.Services
                 ActiveBattle = battleDto,
                 IsPlayerTurn = game.CurrentPlayerIndex == player.PlayerIndex
             };
+            JsonSerializer.Serialize(gsr, new JsonSerializerOptions { WriteIndented = true });
+            Console.WriteLine($"GameStateResponse: {JsonSerializer.Serialize(gsr, new JsonSerializerOptions { WriteIndented = true })}");
+            return gsr;
         }
 
         private Player ValidatePlayerTurn(Game game, string playerId)

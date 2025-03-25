@@ -27,7 +27,14 @@ namespace HexGame.API.Data
                 Status = GameStatus.Created
             };
             var testQuery = await _client.From<Game>().Get();
-            Console.WriteLine($"Test query result: {JsonSerializer.Serialize(testQuery.Models)}");
+            var testQueryResult = testQuery.Models.Select(game => new
+            {
+                game.Id,
+                game.NumberOfPlayers,
+                game.MapSize,
+                game.Status
+            });
+            Console.WriteLine($"Test query result: {JsonSerializer.Serialize(testQueryResult)}");
 
             // Insert the game into Supabase
             Postgrest.Responses.ModeledResponse<Game> response;
