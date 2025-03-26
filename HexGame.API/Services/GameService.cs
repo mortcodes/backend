@@ -71,7 +71,13 @@ namespace HexGame.API.Services
             var game = await _gameRepository.GetGameAsync(gameId);
             
             // Validate that it's the player's turn
-            var player = ValidatePlayerTurn(game, playerId);
+            var (player, isPlayerTurn) = ValidatePlayerTurn(game, playerId);
+
+            // Only allow movement if it's the player's turn
+            if (!isPlayerTurn)
+            {
+                throw new ArgumentException("It's not your turn. You can view the game but not make changes.");
+            }
 
             // Get the character
             var character = player.Characters.FirstOrDefault(c => c.Id == request.CharacterId);
@@ -161,11 +167,7 @@ namespace HexGame.API.Services
             var game = await _gameRepository.GetGameAsync(gameId);
             
             // Get player
-            var player = game.Players.FirstOrDefault(p => p.Id == playerId);
-            if (player == null)
-            {
-                throw new ArgumentException($"Player with ID {playerId} not found in game {gameId}");
-            }
+            var (player, isPlayerTurn) = ValidatePlayerTurn(game, playerId);
 
             // Get the card
             var card = player.Hand.FirstOrDefault(c => c.Id == request.CardId);
@@ -208,9 +210,9 @@ namespace HexGame.API.Services
             else
             {
                 // For general phase cards, validate that it's the player's turn
-                if (game.CurrentPlayerIndex != player.PlayerIndex)
+                if (!isPlayerTurn)
                 {
-                    throw new ArgumentException("It's not your turn");
+                    throw new ArgumentException("It's not your turn. You can view the game but not make changes.");
                 }
 
                 // Check if this is a general phase card
@@ -236,7 +238,13 @@ namespace HexGame.API.Services
             var game = await _gameRepository.GetGameAsync(gameId);
             
             // Validate that it's the player's turn
-            var player = ValidatePlayerTurn(game, playerId);
+            var (player, isPlayerTurn) = ValidatePlayerTurn(game, playerId);
+
+            // Only allow ending turn if it's actually the player's turn
+            if (!isPlayerTurn)
+            {
+                throw new ArgumentException("It's not your turn. You can view the game but not make changes.");
+            }
 
             // Check if there's an active battle - can't end turn during a battle
             var activeBattle = await _gameRepository.GetActiveBattleAsync(gameId);
@@ -528,6 +536,9 @@ namespace HexGame.API.Services
                 };
             }
 
+            // Check if it's the player's turn
+            bool isPlayerTurn = game.CurrentPlayerIndex == player.PlayerIndex;
+
             var gsr = new GameStateResponse
             {
                 GameId = game.Id,
@@ -541,14 +552,15 @@ namespace HexGame.API.Services
                 Characters = characterDtos,
                 Hand = playerDto.Hand,
                 ActiveBattle = battleDto,
-                IsPlayerTurn = game.CurrentPlayerIndex == player.PlayerIndex
+                // Set isPlayerTurn correctly based on the current player index
+                IsPlayerTurn = isPlayerTurn
             };
             JsonSerializer.Serialize(gsr, new JsonSerializerOptions { WriteIndented = true });
             Console.WriteLine($"GameStateResponse: {JsonSerializer.Serialize(gsr, new JsonSerializerOptions { WriteIndented = true })}");
             return gsr;
         }
 
-        private Player ValidatePlayerTurn(Game game, string playerId)
+        private (Player player, bool isPlayerTurn) ValidatePlayerTurn(Game game, string playerId)
         {
             var player = game.Players.FirstOrDefault(p => p.Id == playerId);
             if (player == null)
@@ -556,12 +568,8 @@ namespace HexGame.API.Services
                 throw new ArgumentException($"Player with ID {playerId} not found in game {game.Id}");
             }
 
-            if (game.CurrentPlayerIndex != player.PlayerIndex)
-            {
-                throw new ArgumentException("It's not your turn");
-            }
-
-            return player;
+            bool isPlayerTurn = game.CurrentPlayerIndex == player.PlayerIndex;
+            return (player, isPlayerTurn);
         }
 
         private bool IsAdjacent(int q1, int r1, int q2, int r2)
@@ -570,9 +578,13 @@ namespace HexGame.API.Services
             int s1 = -q1 - r1;
             int s2 = -q2 - r2;
 
-            // Calculate distance using the cube coordinate distance formula
-            int distance = (Math.Abs(q1 - q2) + Math.Abs(r1 - r2) + Math.Abs(s1 - s2)) / 2;
-            return distance == 1; // Adjacent hexes are exactly 1 unit away
+            // Calculate distance using the cube coordinate distance formula for hexes
+            // Adjacent hexes have exactly one coordinate that differs by 1
+            int dq = Math.Abs(q1 - q2);
+            int dr = Math.Abs(r1 - r2);
+            int ds = Math.Abs(s1 - s2);
+            
+            return Math.Max(Math.Max(dq, dr), ds) == 1;
         }
 
         private void ApplyBattleCardEffect(Battle battle, Card card, string playerId)
