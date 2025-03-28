@@ -32,6 +32,10 @@ namespace HexGame.API.Services
             {
                 // Create the game
                 var game = await _gameRepository.CreateGameAsync(request.NumberOfPlayers, request.MapSize);
+                
+                // Store all player IDs as participants
+                game.ParticipantPlayerIds = game.Players.Select(p => p.Id).ToList();
+                await _gameRepository.UpdateGameAsync(game);
 
                 // Prepare response
                 var response = new CreateGameResponse
@@ -54,9 +58,10 @@ namespace HexGame.API.Services
             // Get the entire game state from the repository
             var game = await _gameRepository.GetGameAsync(gameId);
             
+     
             // Get the player
             var player = game.Players.FirstOrDefault(p => p.Id == playerId);
-            if (player == null)
+            if (player == null && !game.ParticipantPlayerIds.Contains(playerId))
             {
                 throw new ArgumentException($"Player with ID {playerId} not found in game {gameId}");
             }
@@ -295,9 +300,9 @@ namespace HexGame.API.Services
             // Get the entire game state
             var game = await _gameRepository.GetGameAsync(gameId);
             
-            // Get player
+            // Get the player
             var player = game.Players.FirstOrDefault(p => p.Id == playerId);
-            if (player == null)
+            if (player == null && !game.ParticipantPlayerIds.Contains(playerId))
             {
                 throw new ArgumentException($"Player with ID {playerId} not found in game {gameId}");
             }
@@ -539,6 +544,10 @@ namespace HexGame.API.Services
             // Check if it's the player's turn
             bool isPlayerTurn = game.CurrentPlayerIndex == player.PlayerIndex;
 
+            // Check if this player has lost (is part of the game but has no active characters)
+            bool hasPlayerLost = game.ParticipantPlayerIds.Contains(player.Id) && 
+                                 (!player.IsActive || player.Characters.Count == 0);
+
             var gsr = new GameStateResponse
             {
                 GameId = game.Id,
@@ -552,8 +561,9 @@ namespace HexGame.API.Services
                 Characters = characterDtos,
                 Hand = playerDto.Hand,
                 ActiveBattle = battleDto,
-                // Set isPlayerTurn correctly based on the current player index
-                IsPlayerTurn = isPlayerTurn
+                IsPlayerTurn = isPlayerTurn,
+                HasPlayerLost = hasPlayerLost,
+                ParticipantPlayerIds = game.ParticipantPlayerIds
             };
             JsonSerializer.Serialize(gsr, new JsonSerializerOptions { WriteIndented = true });
             Console.WriteLine($"GameStateResponse: {JsonSerializer.Serialize(gsr, new JsonSerializerOptions { WriteIndented = true })}");

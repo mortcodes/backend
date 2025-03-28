@@ -14,5 +14,7 @@ namespace HexGame.API.Models.DTOs
         public List<CardDto> Hand { get; set; } = new List<CardDto>();
         public BattleDto? ActiveBattle { get; set; }
         public bool IsPlayerTurn { get; set; }
+        public bool HasPlayerLost { get; set; }
+        public List<string> ParticipantPlayerIds { get; set; } = new List<string>();
     }
 }

@@ -41,6 +41,10 @@ namespace HexGame.API.Models
         [JsonConverter(typeof(JsonStringEnumConverter))]
         public GameStatus Status { get; set; } = GameStatus.Created;
 
+        [JsonPropertyName("participant_player_ids")]
+        [Column("participant_player_ids")]
+        public List<string> ParticipantPlayerIds { get; set; } = new List<string>();
+
         // Not stored directly in the database, populated when needed
         [JsonIgnore]
         [Reference(typeof(Player))]
