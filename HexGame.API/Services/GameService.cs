@@ -58,12 +58,25 @@ namespace HexGame.API.Services
             // Get the entire game state from the repository
             var game = await _gameRepository.GetGameAsync(gameId);
             
-     
             // Get the player
             var player = game.Players.FirstOrDefault(p => p.Id == playerId);
             if (player == null && !game.ParticipantPlayerIds.Contains(playerId))
             {
                 throw new ArgumentException($"Player with ID {playerId} not found in game {gameId}");
+            }
+
+            // If the player is null but is in participant IDs, they likely lost the game
+            // Create a placeholder player to avoid null reference exceptions
+            if (player == null && game.ParticipantPlayerIds.Contains(playerId))
+            {
+                player = new Player 
+                { 
+                    Id = playerId,
+                    GameId = gameId,
+                    IsActive = false,
+                    Characters = new List<Character>(),
+                    Hand = new List<Card>()
+                };
             }
 
             // Create response with only information visible to this player
@@ -305,6 +318,23 @@ namespace HexGame.API.Services
             if (player == null && !game.ParticipantPlayerIds.Contains(playerId))
             {
                 throw new ArgumentException($"Player with ID {playerId} not found in game {gameId}");
+            }
+
+            // If the player is null but is in participant IDs, they likely lost the game
+            // Create a placeholder player to avoid null reference exceptions
+            if (player == null && game.ParticipantPlayerIds.Contains(playerId))
+            {
+                player = new Player 
+                { 
+                    Id = playerId,
+                    GameId = gameId,
+                    IsActive = false,
+                    Characters = new List<Character>(),
+                    Hand = new List<Card>()
+                };
+                
+                // Players who have lost can still view but not make battle updates
+                throw new ArgumentException("You have been eliminated from the game and cannot make changes.");
             }
 
             // Get the active battle
@@ -573,12 +603,29 @@ namespace HexGame.API.Services
         private (Player player, bool isPlayerTurn) ValidatePlayerTurn(Game game, string playerId)
         {
             var player = game.Players.FirstOrDefault(p => p.Id == playerId);
+            
+            // If the player is not found but is in participants list, they've lost the game
+            // Create a placeholder to avoid null reference exceptions
+            if (player == null && game.ParticipantPlayerIds.Contains(playerId))
+            {
+                player = new Player 
+                { 
+                    Id = playerId,
+                    GameId = game.Id,
+                    IsActive = false,
+                    PlayerIndex = -1, // Invalid index for a player who has lost
+                    Characters = new List<Character>(),
+                    Hand = new List<Card>()
+                };
+                return (player, false); // Lost players can never take a turn
+            }
+            
             if (player == null)
             {
                 throw new ArgumentException($"Player with ID {playerId} not found in game {game.Id}");
             }
 
-            bool isPlayerTurn = game.CurrentPlayerIndex == player.PlayerIndex;
+            bool isPlayerTurn = game.CurrentPlayerIndex == player.PlayerIndex && player.IsActive;
             return (player, isPlayerTurn);
         }
 
