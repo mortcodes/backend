@@ -839,7 +839,8 @@ namespace HexGame.API.Services
                     IsCompleted = activeBattle.IsCompleted,
                     CurrentPlayerTurn = activeBattle.CurrentPlayerTurn,
                     CardsPlayed = activeBattle.CardsPlayed.ToList(),
-                    PlayerPassed = activeBattle.PlayerPassed.ToList()
+                    PlayerPassed = activeBattle.PlayerPassed.ToList(),
+                    BattleHistory = activeBattle.BattleHistory
                 };
             }
 
@@ -1158,24 +1159,15 @@ namespace HexGame.API.Services
                         }
                         
                         // Apply permanent stat boosts
-                        if (card.Effect.StatBonus > 0 && !string.IsNullOrEmpty(card.TargetId))
+                        if (card.Effect.StatBonus > 0 && !string.IsNullOrEmpty(card.TargetId) &&
+                            card.Effect.AffectsStat == "All")
                         {
                             var targetCharacter = player.Characters.FirstOrDefault(c => c.Id == card.TargetId);
                             if (targetCharacter != null)
                             {
-                                if (card.Effect.AffectsStat == "All" || card.Effect.AffectsStat == "Melee")
-                                {
-                                    targetCharacter.Melee += card.Effect.StatBonus;
-                                }
-                                if (card.Effect.AffectsStat == "All" || card.Effect.AffectsStat == "Magic")
-                                {
-                                    targetCharacter.Magic += card.Effect.StatBonus;
-                                }
-                                if (card.Effect.AffectsStat == "All" || card.Effect.AffectsStat == "Diplomacy")
-                                {
-                                    targetCharacter.Diplomacy += card.Effect.StatBonus;
-                                }
-                                
+                                targetCharacter.Melee += card.Effect.StatBonus;
+                                targetCharacter.Magic += card.Effect.StatBonus;
+                                targetCharacter.Diplomacy += card.Effect.StatBonus;
                                 await _gameRepository.UpdateCharacterAsync(targetCharacter);
                             }
                         }
@@ -1211,10 +1203,96 @@ namespace HexGame.API.Services
             {
                 if (battle.AttackerSubmitted && battle.DefenderSubmitted && !battle.IsCompleted)
                 {
-                    // Process battle cards and update scores in memory
-                    // (Implementation depends on ResolveSubmittedBattlesAsync and ResolveBattleAsync)
-                    // This would be complex to duplicate here, so we'll just issue a warning
-                    Console.WriteLine("Warning: Simulating battle resolution in memory is not implemented.");
+                    Console.WriteLine($"Processing battle {battle.Id} between characters {battle.AttackerCharacterId} and {battle.DefenderCharacterId}");
+                    
+                    try
+                    {
+                        // Get the attacker and defender characters
+                        var attacker = game.Players.SelectMany(p => p.Characters).FirstOrDefault(c => c.Id == battle.AttackerCharacterId);
+                        var defender = game.Players.SelectMany(p => p.Characters).FirstOrDefault(c => c.Id == battle.DefenderCharacterId);
+                        
+                        if (attacker == null || defender == null)
+                        {
+                            Console.WriteLine($"Warning: Could not find characters for battle {battle.Id}. Skipping battle resolution.");
+                            continue;
+                        }
+                        
+                        // Store initial scores for battle history
+                        int initialAttackerScore = battle.AttackerScore;
+                        int initialDefenderScore = battle.DefenderScore;
+                        
+                        // Process cards played by attacker
+                        List<string> attackerCardEffects = new List<string>();
+                        foreach (var cardId in battle.AttackerCardsPlayed)
+                        {
+                            var card = await _gameRepository.GetCardAsync(cardId);
+                            if (card != null)
+                            {
+                                // Apply card effects
+                                string effectDescription = ProcessBattleCard(battle, card, attacker.PlayerId);
+                                if (!string.IsNullOrEmpty(effectDescription))
+                                {
+                                    attackerCardEffects.Add(effectDescription);
+                                }
+                            }
+                        }
+                        
+                        // Process cards played by defender
+                        List<string> defenderCardEffects = new List<string>();
+                        foreach (var cardId in battle.DefenderCardsPlayed)
+                        {
+                            var card = await _gameRepository.GetCardAsync(cardId);
+                            if (card != null)
+                            {
+                                // Apply card effects
+                                string effectDescription = ProcessBattleCard(battle, card, defender.PlayerId);
+                                if (!string.IsNullOrEmpty(effectDescription))
+                                {
+                                    defenderCardEffects.Add(effectDescription);
+                                }
+                            }
+                        }
+                        
+                        // Determine winner
+                        bool attackerWins = battle.AttackerScore > battle.DefenderScore;
+                        
+                        // Create battle history to be stored
+                        var battleHistory = new BattleHistoryRecord
+                        {
+                            BattleId = battle.Id,
+                            GameId = battle.GameId,
+                            BattleType = battle.BattleType.ToString(),
+                            AttackerCharacterId = battle.AttackerCharacterId,
+                            DefenderCharacterId = battle.DefenderCharacterId,
+                            InitialAttackerScore = initialAttackerScore,
+                            InitialDefenderScore = initialDefenderScore,
+                            FinalAttackerScore = battle.AttackerScore,
+                            FinalDefenderScore = battle.DefenderScore,
+                            TerrainBonus = battle.TerrainBonus,
+                            AttackerCardEffects = attackerCardEffects,
+                            DefenderCardEffects = defenderCardEffects,
+                            Winner = attackerWins ? "Attacker" : "Defender",
+                            WinnerId = attackerWins ? attacker.PlayerId : defender.PlayerId,
+                            CompletedAt = DateTime.UtcNow
+                        };
+                        
+                        // Store battle history in battle object (serialized as JSON)
+                        battle.BattleHistory = JsonSerializer.Serialize(battleHistory);
+                        
+                        // Set the winner
+                        battle.WinnerId = attackerWins ? attacker.PlayerId : defender.PlayerId;
+                        
+                        // Now resolve the actual battle outcome
+                        await ResolveBattleAsync(game, battle);
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"Error resolving battle {battle.Id}: {ex.Message}");
+                        if (ex.InnerException != null)
+                        {
+                            Console.WriteLine($"Inner exception: {ex.InnerException.Message}");
+                        }
+                    }
                 }
             }
         }
@@ -1258,6 +1336,64 @@ namespace HexGame.API.Services
             
             return false;
         }
+
+        private string ProcessBattleCard(Battle battle, Card card, string playerId)
+        {
+            var isAttacker = battle.AttackerCharacterId == playerId;
+            string effectDescription = "";
+            
+            // Apply battle bonus if card has one and affects the correct stat type
+            if (card.Effect.BattleBonus > 0)
+            {
+                bool shouldApply = false;
+                
+                // Check if the battle type matches the card's affected stat
+                if (string.IsNullOrEmpty(card.Effect.AffectsStat) || 
+                    card.Effect.AffectsStat == "All" ||
+                    (card.Effect.AffectsStat == "Melee" && battle.BattleType == BattleType.Melee) ||
+                    (card.Effect.AffectsStat == "Magic" && battle.BattleType == BattleType.Magic) ||
+                    (card.Effect.AffectsStat == "Diplomacy" && battle.BattleType == BattleType.Diplomacy))
+                {
+                    shouldApply = true;
+                }
+                
+                if (shouldApply)
+                {
+                    if (isAttacker)
+                    {
+                        battle.AttackerScore += card.Effect.BattleBonus;
+                        effectDescription = $"+{card.Effect.BattleBonus} to attack score from {card.Name}";
+                    }
+                    else
+                    {
+                        battle.DefenderScore += card.Effect.BattleBonus;
+                        effectDescription = $"+{card.Effect.BattleBonus} to defense score from {card.Name}";
+                    }
+                }
+            }
+            
+            // Apply defensive bonus if card has one (defender only)
+            if (card.Effect.DefensiveBonus > 0 && !isAttacker)
+            {
+                battle.DefenderScore += card.Effect.DefensiveBonus;
+                effectDescription = $"+{card.Effect.DefensiveBonus} to defense score from {card.Name} (defensive bonus)";
+            }
+            
+            // Apply terrain negation if applicable
+            if (card.Effect.NegateTerrainBonus)
+            {
+                // Only affect terrain bonus if it exists and the card is played by the attacker
+                if (battle.TerrainBonus > 0 && isAttacker)
+                {
+                    var originalBonus = battle.TerrainBonus;
+                    battle.DefenderScore -= battle.TerrainBonus;
+                    battle.TerrainBonus = 0;
+                    effectDescription = $"Negated defender's terrain bonus of {originalBonus} with {card.Name}";
+                }
+            }
+            
+            return effectDescription;
+        }
     }
 
     public class HexCoordinateComparer : IEqualityComparer<Hex>
@@ -1274,4 +1410,24 @@ namespace HexGame.API.Services
             return HashCode.Combine(obj.Q, obj.R);
         }
     }
+}
+
+// Class to track battle history details for UI display
+public class BattleHistoryRecord
+{
+    public string BattleId { get; set; } = string.Empty;
+    public string GameId { get; set; } = string.Empty;
+    public string BattleType { get; set; } = string.Empty;
+    public string AttackerCharacterId { get; set; } = string.Empty;
+    public string DefenderCharacterId { get; set; } = string.Empty;
+    public int InitialAttackerScore { get; set; }
+    public int InitialDefenderScore { get; set; }
+    public int FinalAttackerScore { get; set; }
+    public int FinalDefenderScore { get; set; }
+    public int TerrainBonus { get; set; }
+    public List<string> AttackerCardEffects { get; set; } = new List<string>();
+    public List<string> DefenderCardEffects { get; set; } = new List<string>();
+    public string Winner { get; set; } = string.Empty;
+    public string WinnerId { get; set; } = string.Empty;
+    public DateTime CompletedAt { get; set; }
 }

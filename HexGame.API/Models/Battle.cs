@@ -84,6 +84,11 @@ namespace HexGame.API.Models
         [JsonPropertyName("player_passed")]
         [Column("player_passed")]
         public List<string> PlayerPassed { get; set; } = new List<string>();
+        
+        // Add battle history field to store detailed resolution information
+        [JsonPropertyName("battle_history")]
+        [Column("battle_history")]
+        public string? BattleHistory { get; set; }
     }
 
     public enum BattleType
