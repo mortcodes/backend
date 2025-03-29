@@ -14,6 +14,12 @@ namespace HexGame.API.Models.DTOs
         public int TerrainBonus { get; set; }
         public string? WinnerId { get; set; }
         public bool IsCompleted { get; set; } = false;
+        public bool AttackerSubmitted { get; set; } = false;
+        public bool DefenderSubmitted { get; set; } = false;
+        public List<string> AttackerCardsPlayed { get; set; } = new List<string>();
+        public List<string> DefenderCardsPlayed { get; set; } = new List<string>();
+        
+        // Keeping these for backward compatibility
         public string? CurrentPlayerTurn { get; set; }
         public List<string> CardsPlayed { get; set; } = new List<string>();
         public List<string> PlayerPassed { get; set; } = new List<string>();

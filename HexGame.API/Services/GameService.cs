@@ -187,6 +187,12 @@ namespace HexGame.API.Services
             // Get player
             var (player, isPlayerTurn) = ValidatePlayerTurn(game, playerId);
 
+            // Only allow playing cards during your turn
+            if (!isPlayerTurn)
+            {
+                throw new ArgumentException("You can only play cards during your turn.");
+            }
+
             // Get the card
             var card = player.Hand.FirstOrDefault(c => c.Id == request.CardId);
             if (card == null)
@@ -197,54 +203,35 @@ namespace HexGame.API.Services
             // Check if there's an active battle
             var activeBattle = await _gameRepository.GetActiveBattleAsync(gameId);
 
-            // If there's an active battle, this should be a battle card
+            // You can't play cards during battles anymore, must use battle update request
             if (activeBattle != null)
             {
-                // Check if it's the player's turn in the battle
-                if (activeBattle.CurrentPlayerTurn != playerId)
-                {
-                    throw new ArgumentException("It's not your turn in the battle");
-                }
-
-                // Check if this is a battle card
-                if (card.CardType != CardType.Battle)
-                {
-                    throw new ArgumentException("Only battle cards can be played during a battle");
-                }
-
-                // Apply card effect to the battle
-                ApplyBattleCardEffect(activeBattle, card, playerId);
-                
-                // Update the battle
-                await _gameRepository.UpdateBattleAsync(activeBattle);
-                
-                // Switch to the other player's turn
-                activeBattle.CurrentPlayerTurn = activeBattle.AttackerCharacterId == playerId 
-                    ? game.Players.FirstOrDefault(p => p.Characters.Any(c => c.Id == activeBattle.DefenderCharacterId))?.Id
-                    : game.Players.FirstOrDefault(p => p.Characters.Any(c => c.Id == activeBattle.AttackerCharacterId))?.Id;
-                
-                await _gameRepository.UpdateBattleAsync(activeBattle);
+                throw new ArgumentException("You cannot play cards directly during battle. Use the battle update to submit your battle actions.");
             }
-            else
+
+            // Queue the card for end-of-turn resolution
+            card.PendingResolution = true;
+            card.PlayedOnTurn = game.CurrentTurn;
+            
+            // Store target information
+            if (!string.IsNullOrEmpty(request.TargetCharacterId))
             {
-                // For general phase cards, validate that it's the player's turn
-                if (!isPlayerTurn)
+                card.TargetId = request.TargetCharacterId;
+                
+                // Verify target character exists
+                var targetCharacter = game.Players.SelectMany(p => p.Characters).FirstOrDefault(c => c.Id == request.TargetCharacterId);
+                if (targetCharacter == null)
                 {
-                    throw new ArgumentException("It's not your turn. You can view the game but not make changes.");
+                    throw new ArgumentException($"Target character with ID {request.TargetCharacterId} not found");
                 }
-
-                // Check if this is a general phase card
-                if (card.CardType != CardType.General)
-                {
-                    throw new ArgumentException("This card can only be played during battle");
-                }
-
-                // Apply card effect based on its type
-                await ApplyGeneralCardEffect(game, player, card, request);
             }
+            
+            // Update the card
+            await _gameRepository.UpdateCardAsync(card);
 
             // Remove the card from player's hand
-            await _gameRepository.RemoveCardAsync(card.Id);
+            player.Hand.Remove(card);
+            await _gameRepository.UpdatePlayerAsync(player);
 
             // Return updated game state
             return await GetGameStateAsync(gameId, playerId);
@@ -263,15 +250,8 @@ namespace HexGame.API.Services
             {
                 throw new ArgumentException("It's not your turn. You can view the game but not make changes.");
             }
-
-            // Check if there's an active battle - can't end turn during a battle
-            var activeBattle = await _gameRepository.GetActiveBattleAsync(gameId);
-            if (activeBattle != null)
-            {
-                throw new ArgumentException("Cannot end turn during an active battle");
-            }
-
-            // Process resources from owned hexes
+            
+            // Process resources from owned hexes (commented out as it's not implemented in original code)
             // foreach (var hex in game.Hexes.Where(h => h.OwnerId == playerId))
             // {
             //     player.Resources.Industry += hex.ResourceIndustry;
@@ -279,9 +259,12 @@ namespace HexGame.API.Services
             //     player.Resources.Building += hex.ResourceBuilding;
             // }
             
-            // Update player resources
+            // Update player
             await _gameRepository.UpdatePlayerAsync(player);
 
+            // Resolve pending card effects
+            await ResolvePendingCardEffectsAsync(game, player);
+            
             // Draw 2 cards for the player
             await DrawCardsForPlayer(game.Id, playerId, 2);
 
@@ -292,14 +275,14 @@ namespace HexGame.API.Services
                 await _gameRepository.UpdateCharacterAsync(character);
             }
 
-            // Advance to the next player
-            game.CurrentPlayerIndex = (game.CurrentPlayerIndex + 1) % game.NumberOfPlayers;
-            
-            // If we've cycled through all players, increment the turn counter
-            if (game.CurrentPlayerIndex == 0)
+            // Mark this player as having submitted their turn
+            if (!game.SubmittedTurnPlayerIds.Contains(playerId))
             {
-                game.CurrentTurn++;
+                game.SubmittedTurnPlayerIds.Add(playerId);
             }
+
+            // Check if we need to resolve the end of the turn
+            await ResolveEndOfTurn(game);
             
             // Update the game state
             await _gameRepository.UpdateGameAsync(game);
@@ -321,19 +304,8 @@ namespace HexGame.API.Services
             }
 
             // If the player is null but is in participant IDs, they likely lost the game
-            // Create a placeholder player to avoid null reference exceptions
             if (player == null && game.ParticipantPlayerIds.Contains(playerId))
             {
-                player = new Player 
-                { 
-                    Id = playerId,
-                    GameId = gameId,
-                    IsActive = false,
-                    Characters = new List<Character>(),
-                    Hand = new List<Card>()
-                };
-                
-                // Players who have lost can still view but not make battle updates
                 throw new ArgumentException("You have been eliminated from the game and cannot make changes.");
             }
 
@@ -344,15 +316,23 @@ namespace HexGame.API.Services
                 throw new ArgumentException($"Battle with ID {request.BattleId} not found or not active");
             }
 
-            // Check if it's the player's turn in the battle
-            if (battle.CurrentPlayerTurn != playerId)
+            // Check if this player is involved in the battle
+            var isAttacker = IsAttackerPlayer(game, battle, playerId);
+            var isDefender = IsDefenderPlayer(game, battle, playerId);
+            
+            if (!isAttacker && !isDefender)
             {
-                throw new ArgumentException("It's not your turn in the battle");
+                throw new ArgumentException("You are not involved in this battle");
             }
 
-            // If defender is setting battle type
-            if (request.BattleType.HasValue && battle.CurrentPlayerTurn == game.Players.FirstOrDefault(p => 
-                p.Characters.Any(c => c.Id == battle.DefenderCharacterId))?.Id)
+            // Check if player already submitted their turn
+            if ((isAttacker && battle.AttackerSubmitted) || (isDefender && battle.DefenderSubmitted))
+            {
+                throw new ArgumentException("You have already submitted your actions for this battle");
+            }
+
+            // If defender is choosing battle type
+            if (request.BattleType.HasValue && isDefender && string.IsNullOrEmpty(battle.CurrentPlayerTurn))
             {
                 battle.BattleType = request.BattleType.Value;
                 
@@ -378,72 +358,82 @@ namespace HexGame.API.Services
                             break;
                     }
                 }
-                
-                // Attacker goes first after battle type is chosen
-                battle.CurrentPlayerTurn = game.Players.FirstOrDefault(p => 
-                    p.Characters.Any(c => c.Id == battle.AttackerCharacterId))?.Id;
-                
-                await _gameRepository.UpdateBattleAsync(battle);
             }
-            // If player is passing
-            else if (request.Pass.HasValue && request.Pass.Value)
+
+            // Process card submissions - just store them for later resolution
+            if (request.CardIds != null && request.CardIds.Count > 0)
             {
-                // Mark player as passed
-                battle.PlayerPassed.Add(playerId);
-                
-                // If both players have passed, resolve the battle
-                if (battle.PlayerPassed.Count >= 2 || battle.PlayerPassed.Contains(
-                    game.Players.FirstOrDefault(p => p.Characters.Any(c => c.Id == battle.AttackerCharacterId))?.Id) && 
-                    battle.PlayerPassed.Contains(
-                    game.Players.FirstOrDefault(p => p.Characters.Any(c => c.Id == battle.DefenderCharacterId))?.Id))
+                foreach (var cardId in request.CardIds)
                 {
-                    await ResolveBattleAsync(game, battle);
+                    // Verify card exists and is in player's hand
+                    var card = player.Hand.FirstOrDefault(c => c.Id == cardId);
+                    if (card == null)
+                    {
+                        throw new ArgumentException($"Card with ID {cardId} not found in player's hand");
+                    }
+
+                    // Check if it's a battle card
+                    if (card.CardType != CardType.Battle)
+                    {
+                        throw new ArgumentException("Only battle cards can be played during a battle");
+                    }
+
+                    // Mark the card as pending resolution
+                    card.PendingResolution = true;
+                    card.PlayedOnTurn = game.CurrentTurn;
+                    
+                    // Store the card in the appropriate list
+                    if (isAttacker)
+                    {
+                        battle.AttackerCardsPlayed.Add(cardId);
+                    }
+                    else
+                    {
+                        battle.DefenderCardsPlayed.Add(cardId);
+                    }
+                    
+                    await _gameRepository.UpdateCardAsync(card);
+                }
+            }
+
+            // Mark player as submitted if they're submitting their turn
+            if (request.SubmitTurn.HasValue && request.SubmitTurn.Value)
+            {
+                if (isAttacker)
+                {
+                    battle.AttackerSubmitted = true;
+                    
+                    // Also mark this player as having submitted their turn for the round
+                    if (!game.SubmittedTurnPlayerIds.Contains(playerId))
+                    {
+                        game.SubmittedTurnPlayerIds.Add(playerId);
+                    }
                 }
                 else
                 {
-                    // Switch to other player
-                    battle.CurrentPlayerTurn = battle.CurrentPlayerTurn == 
-                        game.Players.FirstOrDefault(p => p.Characters.Any(c => c.Id == battle.AttackerCharacterId))?.Id
-                        ? game.Players.FirstOrDefault(p => p.Characters.Any(c => c.Id == battle.DefenderCharacterId))?.Id
-                        : game.Players.FirstOrDefault(p => p.Characters.Any(c => c.Id == battle.AttackerCharacterId))?.Id;
-                        
-                    await _gameRepository.UpdateBattleAsync(battle);
-                }
-            }
-            // If player is playing a card
-            else if (!string.IsNullOrEmpty(request.CardId))
-            {
-                // Get the card
-                var card = player.Hand.FirstOrDefault(c => c.Id == request.CardId);
-                if (card == null)
-                {
-                    throw new ArgumentException($"Card with ID {request.CardId} not found in player's hand");
-                }
-
-                // Check if it's a battle card
-                if (card.CardType != CardType.Battle)
-                {
-                    throw new ArgumentException("Only battle cards can be played during a battle");
-                }
-
-                // Apply card effect
-                ApplyBattleCardEffect(battle, card, playerId);
-                
-                // Add card to played cards list
-                battle.CardsPlayed.Add(card.Id);
-                
-                // Switch to other player
-                battle.CurrentPlayerTurn = battle.CurrentPlayerTurn == 
-                    game.Players.FirstOrDefault(p => p.Characters.Any(c => c.Id == battle.AttackerCharacterId))?.Id
-                    ? game.Players.FirstOrDefault(p => p.Characters.Any(c => c.Id == battle.DefenderCharacterId))?.Id
-                    : game.Players.FirstOrDefault(p => p.Characters.Any(c => c.Id == battle.AttackerCharacterId))?.Id;
+                    battle.DefenderSubmitted = true;
                     
-                await _gameRepository.UpdateBattleAsync(battle);
+                    // Also mark this player as having submitted their turn for the round
+                    if (!game.SubmittedTurnPlayerIds.Contains(playerId))
+                    {
+                        game.SubmittedTurnPlayerIds.Add(playerId);
+                    }
+                }
                 
-                // Remove card from player's hand
-                await _gameRepository.RemoveCardAsync(card.Id);
+                // Use the centralized ResolveEndOfTurn function to check if all players have submitted
+                await ResolveEndOfTurn(game);
             }
-
+            
+            // If both players have submitted, resolve the battle
+            if (battle.AttackerSubmitted && battle.DefenderSubmitted)
+            {
+                // Battle will be resolved during end turn
+                battle.CurrentPlayerTurn = null; // No player's turn since both submitted
+            }
+            
+            // Update the battle
+            await _gameRepository.UpdateBattleAsync(battle);
+            
             return await GetGameStateAsync(gameId, playerId);
         }
 
@@ -572,7 +562,9 @@ namespace HexGame.API.Services
             }
 
             // Check if it's the player's turn
-            bool isPlayerTurn = game.CurrentPlayerIndex == player.PlayerIndex;
+            bool hasSubmittedTurn = game.SubmittedTurnPlayerIds.Contains(player.Id);
+            // Player can take a turn if they are active and haven't submitted their turn yet
+            bool isPlayerTurn = player.IsActive && !hasSubmittedTurn;
 
             // Check if this player has lost (is part of the game but has no active characters)
             bool hasPlayerLost = game.ParticipantPlayerIds.Contains(player.Id) && 
@@ -593,10 +585,11 @@ namespace HexGame.API.Services
                 ActiveBattle = battleDto,
                 IsPlayerTurn = isPlayerTurn,
                 HasPlayerLost = hasPlayerLost,
-                ParticipantPlayerIds = game.ParticipantPlayerIds
+                ParticipantPlayerIds = game.ParticipantPlayerIds,
+                SubmittedTurnPlayerIds = game.SubmittedTurnPlayerIds
             };
             JsonSerializer.Serialize(gsr, new JsonSerializerOptions { WriteIndented = true });
-            Console.WriteLine($"GameStateResponse: {JsonSerializer.Serialize(gsr, new JsonSerializerOptions { WriteIndented = true })}");
+            //Console.WriteLine($"GameStateResponse: {JsonSerializer.Serialize(gsr, new JsonSerializerOptions { WriteIndented = true })}");
             return gsr;
         }
 
@@ -625,7 +618,13 @@ namespace HexGame.API.Services
                 throw new ArgumentException($"Player with ID {playerId} not found in game {game.Id}");
             }
 
-            bool isPlayerTurn = game.CurrentPlayerIndex == player.PlayerIndex && player.IsActive;
+            // Check if player has already submitted their turn for the current round
+            bool hasSubmittedTurn = game.SubmittedTurnPlayerIds.Contains(playerId);
+            
+            // Allow any active player who hasn't submitted their turn yet to take actions
+            // Removed the CurrentPlayerIndex requirement so all players can submit turns in parallel
+            bool isPlayerTurn = player.IsActive && !hasSubmittedTurn;
+            
             return (player, isPlayerTurn);
         }
 
@@ -677,8 +676,6 @@ namespace HexGame.API.Services
             //     player.Resources.Industry += card.Effect.ResourceBonus.Industry;
             //     player.Resources.Agriculture += card.Effect.ResourceBonus.Agriculture;
             //     player.Resources.Building += card.Effect.ResourceBonus.Building;
-                
-            //     await _gameRepository.UpdatePlayerAsync(player);
             // }
             
             // Apply additional movement
@@ -789,16 +786,32 @@ namespace HexGame.API.Services
 
         private async Task DrawCardsForPlayer(string gameId, string playerId, int count)
         {
-            // Create a simple card pool
+            // Updated card pool with effects suitable for end-of-turn resolution
             var cardDefinitions = new List<(string Id, CardType Type, string Name, string Description, CardEffect Effect)>
             {
-                ("battle_1", CardType.Battle, "Tactical Strike", "+3 to Melee in battle", new CardEffect { StatBonus = 3, AffectsStat = "Melee" }),
-                ("battle_2", CardType.Battle, "Magic Missile", "+3 to Magic in battle", new CardEffect { StatBonus = 3, AffectsStat = "Magic" }),
-                ("battle_3", CardType.Battle, "Persuasive Argument", "+3 to Diplomacy in battle", new CardEffect { StatBonus = 3, AffectsStat = "Diplomacy" }),
-                ("battle_4", CardType.Battle, "Flanking Maneuver", "+2 to any stat in battle", new CardEffect { StatBonus = 2 }),
-                ("battle_5", CardType.Battle, "Terrain Advantage", "Negate terrain bonus for opponent", new CardEffect { NegateTerrainBonus = true }),
-                ("general_4", CardType.General, "Scout", "+1 Movement this turn", new CardEffect { AdditionalMovement = 1 }),
-                ("general_5", CardType.General, "Training", "+1 to all stats permanently", new CardEffect { StatBonus = 1, AffectsStat = "All" })
+                // Battle cards
+                ("battle_1", CardType.Battle, "Tactical Strike", "+3 to battle score in melee combat", 
+                    new CardEffect { BattleBonus = 3, AffectsStat = "Melee" }),
+                ("battle_2", CardType.Battle, "Magic Missile", "+3 to battle score in magic combat", 
+                    new CardEffect { BattleBonus = 3, AffectsStat = "Magic" }),
+                ("battle_3", CardType.Battle, "Persuasive Argument", "+3 to battle score in diplomacy", 
+                    new CardEffect { BattleBonus = 3, AffectsStat = "Diplomacy" }),
+                ("battle_4", CardType.Battle, "Defensive Position", "+2 to defense when defending", 
+                    new CardEffect { DefensiveBonus = 2 }),
+                ("battle_5", CardType.Battle, "Terrain Analysis", "Negate terrain bonus for opponent", 
+                    new CardEffect { NegateTerrainBonus = true }),
+                
+                // General cards
+                ("general_1", CardType.General, "Strategic Movement", "+1 Movement next turn", 
+                    new CardEffect { AdditionalMovement = 1, EffectDuration = 1 }),
+                ("general_2", CardType.General, "Training Regiment", "+1 to all stats permanently", 
+                    new CardEffect { StatBonus = 1, AffectsStat = "All", EffectDuration = 1 }),
+                ("general_3", CardType.General, "Combat Training", "+2 to Melee stat permanently", 
+                    new CardEffect { StatBonus = 2, AffectsStat = "Melee", EffectDuration = 1 }),
+                ("general_4", CardType.General, "Magic Studies", "+2 to Magic stat permanently", 
+                    new CardEffect { StatBonus = 2, AffectsStat = "Magic", EffectDuration = 1 }),
+                ("general_5", CardType.General, "Diplomatic Mission", "+2 to Diplomacy stat permanently", 
+                    new CardEffect { StatBonus = 2, AffectsStat = "Diplomacy", EffectDuration = 1 }),
             };
             
             // Draw random cards
@@ -819,6 +832,205 @@ namespace HexGame.API.Services
                 
                 await _gameRepository.AddCardAsync(card);
             }
+        }
+
+        private bool IsAttackerPlayer(Game game, Battle battle, string playerId)
+        {
+            var attackerCharacter = game.Players
+                .SelectMany(p => p.Characters)
+                .FirstOrDefault(c => c.Id == battle.AttackerCharacterId);
+            
+            return attackerCharacter != null && attackerCharacter.PlayerId == playerId;
+        }
+
+        private bool IsDefenderPlayer(Game game, Battle battle, string playerId)
+        {
+            var defenderCharacter = game.Players
+                .SelectMany(p => p.Characters)
+                .FirstOrDefault(c => c.Id == battle.DefenderCharacterId);
+            
+            return defenderCharacter != null && defenderCharacter.PlayerId == playerId;
+        }
+
+        private async Task ResolvePendingCardEffectsAsync(Game game, Player player)
+        {
+            // Get all cards played by this player that are pending resolution
+            var pendingCards = await _gameRepository.GetPendingCardsForPlayerAsync(player.Id);
+            
+            foreach (var card in pendingCards)
+            {
+                // Apply card effects based on their type
+                switch (card.CardType)
+                {
+                    case CardType.General:
+                        // Apply general card effects
+                        if (card.Effect.AdditionalMovement > 0 && !string.IsNullOrEmpty(card.TargetId))
+                        {
+                            // Find the target character
+                            var targetCharacter = player.Characters.FirstOrDefault(c => c.Id == card.TargetId);
+                            if (targetCharacter != null)
+                            {
+                                targetCharacter.MovementPoints += card.Effect.AdditionalMovement;
+                                await _gameRepository.UpdateCharacterAsync(targetCharacter);
+                            }
+                        }
+                        
+                        // Apply permanent stat boosts
+                        if (card.Effect.StatBonus > 0 && !string.IsNullOrEmpty(card.TargetId))
+                        {
+                            var targetCharacter = player.Characters.FirstOrDefault(c => c.Id == card.TargetId);
+                            if (targetCharacter != null)
+                            {
+                                if (card.Effect.AffectsStat == "All" || card.Effect.AffectsStat == "Melee")
+                                {
+                                    targetCharacter.Melee += card.Effect.StatBonus;
+                                }
+                                if (card.Effect.AffectsStat == "All" || card.Effect.AffectsStat == "Magic")
+                                {
+                                    targetCharacter.Magic += card.Effect.StatBonus;
+                                }
+                                if (card.Effect.AffectsStat == "All" || card.Effect.AffectsStat == "Diplomacy")
+                                {
+                                    targetCharacter.Diplomacy += card.Effect.StatBonus;
+                                }
+                                
+                                await _gameRepository.UpdateCharacterAsync(targetCharacter);
+                            }
+                        }
+                        break;
+                        
+                    case CardType.Strategy:
+                        // Strategy cards would be applied here
+                        break;
+                }
+                
+                // Mark card as resolved and remove it if it's a one-time effect
+                if (card.Effect.EffectDuration <= 1)
+                {
+                    // One-time effect, remove card
+                    await _gameRepository.RemoveCardAsync(card.Id);
+                }
+                else
+                {
+                    // Multi-turn effect, decrement duration and keep card
+                    card.Effect.EffectDuration--;
+                    card.PendingResolution = false;
+                    await _gameRepository.UpdateCardAsync(card);
+                }
+            }
+        }
+
+        private async Task ResolveSubmittedBattlesAsync(Game game)
+        {
+            // Get all battles for this game where both players have submitted
+            var pendingBattles = await _gameRepository.GetSubmittedBattlesAsync(game.Id);
+            
+            foreach (var battle in pendingBattles)
+            {
+                if (battle.AttackerSubmitted && battle.DefenderSubmitted && !battle.IsCompleted)
+                {
+                    // Process attacker cards
+                    foreach (var cardId in battle.AttackerCardsPlayed)
+                    {
+                        var card = await _gameRepository.GetCardAsync(cardId);
+                        if (card != null)
+                        {
+                            // Apply battle card effects
+                            if (card.Effect.StatBonus != 0)
+                            {
+                                battle.AttackerScore += card.Effect.StatBonus;
+                            }
+                            
+                            if (card.Effect.BattleBonus != 0)
+                            {
+                                battle.AttackerScore += card.Effect.BattleBonus;
+                            }
+                            
+                            // Remove the card after applying its effect
+                            await _gameRepository.RemoveCardAsync(card.Id);
+                        }
+                    }
+                    
+                    // Process defender cards
+                    foreach (var cardId in battle.DefenderCardsPlayed)
+                    {
+                        var card = await _gameRepository.GetCardAsync(cardId);
+                        if (card != null)
+                        {
+                            // Apply battle card effects
+                            if (card.Effect.StatBonus != 0)
+                            {
+                                battle.DefenderScore += card.Effect.StatBonus;
+                            }
+                            
+                            if (card.Effect.BattleBonus != 0)
+                            {
+                                battle.DefenderScore += card.Effect.BattleBonus;
+                            }
+                            
+                            if (card.Effect.DefensiveBonus != 0)
+                            {
+                                battle.DefenderScore += card.Effect.DefensiveBonus;
+                            }
+                            
+                            if (card.Effect.NegateTerrainBonus)
+                            {
+                                battle.DefenderScore -= battle.TerrainBonus;
+                                battle.TerrainBonus = 0;
+                            }
+                            
+                            // Remove the card after applying its effect
+                            await _gameRepository.RemoveCardAsync(card.Id);
+                        }
+                    }
+                    
+                    // Update battle with new scores
+                    await _gameRepository.UpdateBattleAsync(battle);
+                    
+                    // Now resolve the battle with updated scores
+                    await ResolveBattleAsync(game, battle);
+                }
+            }
+        }
+
+        // Centralized function to check and resolve end-of-turn conditions
+        private async Task<bool> ResolveEndOfTurn(Game game)
+        {
+            // Check if all active players have submitted their turns
+            bool allPlayersSubmitted = true;
+            foreach (var activePlayer in game.Players.Where(p => p.IsActive))
+            {
+                if (!game.SubmittedTurnPlayerIds.Contains(activePlayer.Id))
+                {
+                    allPlayersSubmitted = false;
+                    break;
+                }
+            }
+
+            // If all players have submitted, resolve the turn
+            if (allPlayersSubmitted)
+            {
+                Console.WriteLine($"All players submitted their turns for turn {game.CurrentTurn}. Resolving end of turn.");
+                
+                // Resolve all battles where both players have submitted
+                await ResolveSubmittedBattlesAsync(game);
+                
+                // Increment the turn counter
+                game.CurrentTurn++;
+                Console.WriteLine($"Starting new turn {game.CurrentTurn}");
+                
+                // Reset the submitted player list for the new turn
+                game.SubmittedTurnPlayerIds.Clear();
+                
+                // Reset to the first player's turn
+                game.CurrentPlayerIndex = 0;
+                
+                // Update the game state
+                await _gameRepository.UpdateGameAsync(game);
+                return true;
+            }
+            
+            return false;
         }
     }
 

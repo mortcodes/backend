@@ -5,11 +5,13 @@ CREATE TABLE IF NOT EXISTS games (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     number_of_players INT NOT NULL,
     map_size INT NOT NULL,
-    current_turn INT NOT NULL DEFAULT 0,
+    current_turn INT NOT NULL DEFAULT 1,
     current_player_index INT NOT NULL DEFAULT 0,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-    status TEXT NOT NULL DEFAULT 'Created'
+    status TEXT NOT NULL DEFAULT 'Created',
+    participant_player_ids TEXT[] DEFAULT '{}'::TEXT[],
+    submitted_turn_player_ids TEXT[] DEFAULT '{}'::TEXT[]
 );
 
 -- Players table
@@ -60,7 +62,10 @@ CREATE TABLE IF NOT EXISTS cards (
     card_definition_id TEXT NOT NULL,
     name TEXT NOT NULL,
     description TEXT NOT NULL,
-    effect JSONB NOT NULL DEFAULT '{}'::JSONB
+    effect JSONB NOT NULL DEFAULT '{}'::JSONB,
+    pending_resolution BOOLEAN NOT NULL DEFAULT FALSE,
+    target_id TEXT,
+    played_on_turn INT
 );
 
 -- Battles table
@@ -77,6 +82,10 @@ CREATE TABLE IF NOT EXISTS battles (
     terrain_bonus INT NOT NULL DEFAULT 0,
     winner_id UUID REFERENCES players(id),
     is_completed BOOLEAN NOT NULL DEFAULT FALSE,
+    attacker_submitted BOOLEAN NOT NULL DEFAULT FALSE,
+    defender_submitted BOOLEAN NOT NULL DEFAULT FALSE,
+    attacker_cards_played TEXT[] DEFAULT '{}'::TEXT[],
+    defender_cards_played TEXT[] DEFAULT '{}'::TEXT[],
     current_player_turn UUID REFERENCES players(id),
     cards_played TEXT[] DEFAULT '{}'::TEXT[],
     player_passed TEXT[] DEFAULT '{}'::TEXT[]
@@ -89,9 +98,11 @@ CREATE INDEX IF NOT EXISTS idx_characters_game_id ON characters(game_id);
 CREATE INDEX IF NOT EXISTS idx_characters_player_id ON characters(player_id);
 CREATE INDEX IF NOT EXISTS idx_cards_game_id ON cards(game_id);
 CREATE INDEX IF NOT EXISTS idx_cards_player_id ON cards(player_id);
+CREATE INDEX IF NOT EXISTS idx_cards_pending_resolution ON cards(pending_resolution);
 CREATE INDEX IF NOT EXISTS idx_players_game_id ON players(game_id);
 CREATE INDEX IF NOT EXISTS idx_battles_game_id ON battles(game_id);
 CREATE INDEX IF NOT EXISTS idx_battles_is_completed ON battles(is_completed);
+CREATE INDEX IF NOT EXISTS idx_battles_submitted ON battles(attacker_submitted, defender_submitted);
 
 -- Create Row Level Security (RLS) Policies for Supabase
 ALTER TABLE games ENABLE ROW LEVEL SECURITY;

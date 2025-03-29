@@ -16,5 +16,6 @@ namespace HexGame.API.Models.DTOs
         public bool IsPlayerTurn { get; set; }
         public bool HasPlayerLost { get; set; }
         public List<string> ParticipantPlayerIds { get; set; } = new List<string>();
+        public List<string> SubmittedTurnPlayerIds { get; set; } = new List<string>();
     }
 }

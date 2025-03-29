@@ -4,7 +4,7 @@ namespace HexGame.API.Models.DTOs
     {
         public string BattleId { get; set; } = string.Empty;
         public BattleType? BattleType { get; set; }
-        public bool? Pass { get; set; }
-        public string? CardId { get; set; }
+        public bool? SubmitTurn { get; set; }
+        public List<string> CardIds { get; set; } = new List<string>();
     }
 }

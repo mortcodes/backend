@@ -56,6 +56,23 @@ namespace HexGame.API.Models
         [Column("is_completed")]
         public bool IsCompleted { get; set; } = false;
         
+        [JsonPropertyName("attacker_submitted")]
+        [Column("attacker_submitted")]
+        public bool AttackerSubmitted { get; set; } = false;
+        
+        [JsonPropertyName("defender_submitted")]
+        [Column("defender_submitted")]
+        public bool DefenderSubmitted { get; set; } = false;
+        
+        [JsonPropertyName("attacker_cards_played")]
+        [Column("attacker_cards_played")]
+        public List<string> AttackerCardsPlayed { get; set; } = new List<string>();
+        
+        [JsonPropertyName("defender_cards_played")]
+        [Column("defender_cards_played")]
+        public List<string> DefenderCardsPlayed { get; set; } = new List<string>();
+        
+        // These are deprecated but kept for backward compatibility
         [JsonPropertyName("current_player_turn")]
         [Column("current_player_turn")]
         public string? CurrentPlayerTurn { get; set; }

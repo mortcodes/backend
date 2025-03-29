@@ -22,7 +22,7 @@ namespace HexGame.API.Models
         
         [JsonPropertyName("current_turn")]
         [Column("current_turn")]
-        public int CurrentTurn { get; set; } = 0;
+        public int CurrentTurn { get; set; } = 1;  // Start at turn 1 instead of 0
         
         [JsonPropertyName("current_player_index")]
         [Column("current_player_index")]
@@ -44,6 +44,10 @@ namespace HexGame.API.Models
         [JsonPropertyName("participant_player_ids")]
         [Column("participant_player_ids")]
         public List<string> ParticipantPlayerIds { get; set; } = new List<string>();
+
+        [JsonPropertyName("submitted_turn_player_ids")]
+        [Column("submitted_turn_player_ids")]
+        public List<string> SubmittedTurnPlayerIds { get; set; } = new List<string>();
 
         // Not stored directly in the database, populated when needed
         [JsonIgnore]

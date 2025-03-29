@@ -181,6 +181,68 @@ namespace HexGame.API.Data
             return response.Models.FirstOrDefault();
         }
 
+        public async Task<IEnumerable<Battle>> GetAllActiveBattlesAsync(string gameId)
+        {
+            var response = await _client.From<Battle>()
+                .Where(b => b.GameId == gameId && b.IsCompleted == false)
+                .Get();
+
+            return response.Models;
+        }
+
+        public async Task<IEnumerable<Battle>> GetSubmittedBattlesAsync(string gameId)
+        {
+            try
+            {
+                Console.WriteLine($"Fetching submitted battles for game {gameId}");
+                
+                // Use simpler string-based SQL query instead of the filter API
+                var response = await _client.From<Battle>()
+                    .Where(b => b.GameId == gameId && b.IsCompleted == false 
+                             && b.AttackerSubmitted == true && b.DefenderSubmitted == true)
+                    .Get();
+                
+                Console.WriteLine($"Found {response.Models.Count()} submitted battles");
+                return response.Models;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error in GetSubmittedBattlesAsync: {ex.Message}");
+                if (ex.InnerException != null)
+                {
+                    Console.WriteLine($"Inner exception: {ex.InnerException.Message}");
+                }
+                
+                // Return empty collection instead of throwing an exception
+                return new List<Battle>();
+            }
+        }
+
+        public async Task<IEnumerable<Card>> GetPendingCardsForPlayerAsync(string playerId)
+        {
+            var response = await _client.From<Card>()
+                .Where(c => c.PlayerId == playerId && c.PendingResolution == true)
+                .Get();
+
+            return response.Models;
+        }
+
+        public async Task<Card?> GetCardAsync(string cardId)
+        {
+            var response = await _client.From<Card>()
+                .Where(c => c.Id == cardId)
+                .Get();
+
+            return response.Models.FirstOrDefault();
+        }
+
+        public async Task UpdateCardAsync(Card card)
+        {
+            await _client.From<Card>()
+                .Where(c => c.Id == card.Id)
+                .Update(card);
+        }
+
         public async Task UpdateGameAsync(Game game)
         {
             // Update the game's timestamps
@@ -369,16 +431,32 @@ namespace HexGame.API.Data
 
         private async Task DealInitialCardsAsync(string gameId, string playerId)
         {
-            // Create a simple card pool
+            // Updated card pool with effects suitable for end-of-turn resolution
             var cardDefinitions = new List<(string Id, CardType Type, string Name, string Description, CardEffect Effect)>
             {
-                ("battle_1", CardType.Battle, "Tactical Strike", "+3 to Melee in battle", new CardEffect { StatBonus = 3, AffectsStat = "Melee" }),
-                ("battle_2", CardType.Battle, "Magic Missile", "+3 to Magic in battle", new CardEffect { StatBonus = 3, AffectsStat = "Magic" }),
-                ("battle_3", CardType.Battle, "Persuasive Argument", "+3 to Diplomacy in battle", new CardEffect { StatBonus = 3, AffectsStat = "Diplomacy" }),
-                ("battle_4", CardType.Battle, "Flanking Maneuver", "+2 to any stat in battle", new CardEffect { StatBonus = 2 }),
-                ("battle_5", CardType.Battle, "Terrain Advantage", "Negate terrain bonus for opponent", new CardEffect { NegateTerrainBonus = true }),
-                ("general_4", CardType.General, "Scout", "+1 Movement this turn", new CardEffect { AdditionalMovement = 1 }),
-                ("general_5", CardType.General, "Training", "+1 to all stats permanently", new CardEffect { StatBonus = 1, AffectsStat = "All" })
+                // Battle cards
+                ("battle_1", CardType.Battle, "Tactical Strike", "+3 to battle score in melee combat", 
+                    new CardEffect { BattleBonus = 3, AffectsStat = "Melee" }),
+                ("battle_2", CardType.Battle, "Magic Missile", "+3 to battle score in magic combat", 
+                    new CardEffect { BattleBonus = 3, AffectsStat = "Magic" }),
+                ("battle_3", CardType.Battle, "Persuasive Argument", "+3 to battle score in diplomacy", 
+                    new CardEffect { BattleBonus = 3, AffectsStat = "Diplomacy" }),
+                ("battle_4", CardType.Battle, "Defensive Position", "+2 to defense when defending", 
+                    new CardEffect { DefensiveBonus = 2 }),
+                ("battle_5", CardType.Battle, "Terrain Analysis", "Negate terrain bonus for opponent", 
+                    new CardEffect { NegateTerrainBonus = true }),
+                
+                // General cards
+                ("general_1", CardType.General, "Strategic Movement", "+1 Movement next turn", 
+                    new CardEffect { AdditionalMovement = 1, EffectDuration = 1 }),
+                ("general_2", CardType.General, "Training Regiment", "+1 to all stats permanently", 
+                    new CardEffect { StatBonus = 1, AffectsStat = "All", EffectDuration = 1 }),
+                ("general_3", CardType.General, "Combat Training", "+2 to Melee stat permanently", 
+                    new CardEffect { StatBonus = 2, AffectsStat = "Melee", EffectDuration = 1 }),
+                ("general_4", CardType.General, "Magic Studies", "+2 to Magic stat permanently", 
+                    new CardEffect { StatBonus = 2, AffectsStat = "Magic", EffectDuration = 1 }),
+                ("general_5", CardType.General, "Diplomatic Mission", "+2 to Diplomacy stat permanently", 
+                    new CardEffect { StatBonus = 2, AffectsStat = "Diplomacy", EffectDuration = 1 }),
             };
 
             // Deal 4 initial cards
