@@ -47,5 +47,17 @@ namespace HexGame.API.Models
         [JsonPropertyName("max_movement_points")]
         [Column("max_movement_points")]
         public int MaxMovementPoints { get; set; } = 2;
+        
+        [JsonPropertyName("pending_move_target_q")]
+        [Column("pending_move_target_q")]
+        public int? PendingMoveTargetQ { get; set; }
+        
+        [JsonPropertyName("pending_move_target_r")]
+        [Column("pending_move_target_r")]
+        public int? PendingMoveTargetR { get; set; }
+        
+        [JsonPropertyName("pending_move_target_character_id")]
+        [Column("pending_move_target_character_id")]
+        public string? PendingMoveTargetCharacterId { get; set; }
     }
 }

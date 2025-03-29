@@ -143,29 +143,25 @@ namespace HexGame.API.Services
                 .SelectMany(p => p.Characters)
                 .FirstOrDefault(c => c.Q == targetHex.Q && c.R == targetHex.R && c.PlayerId != playerId);
 
-            // If there's an opponent on the hex, initiate battle
+            // If there's an opponent on the hex, store movement intent but don't create a battle yet
             if (occupyingCharacter != null)
             {
-                // Create a battle
-                var battle = new Battle
-                {
-                    GameId = gameId,
-                    AttackerCharacterId = character.Id,
-                    DefenderCharacterId = occupyingCharacter.Id,
-                    HexQ = targetHex.Q,
-                    HexR = targetHex.R,
-                    TerrainBonus = targetHex.TerrainRating,
-                    CurrentPlayerTurn = occupyingCharacter.PlayerId // Defender chooses battle type first
-                };
-
-                await _gameRepository.CreateBattleAsync(battle);
-
-                // Don't move the character yet, wait for battle resolution
-                // Return the game state with active battle
+                // Store movement intent in character's PendingMoveTarget properties
+                character.PendingMoveTargetQ = targetHex.Q;
+                character.PendingMoveTargetR = targetHex.R;
+                character.PendingMoveTargetCharacterId = occupyingCharacter.Id;
+                
+                // Update character with pending move information
+                await _gameRepository.UpdateCharacterAsync(character);
+                
+                // Let user know their move intent is registered
+                Console.WriteLine($"Character {character.Id} intends to attack character {occupyingCharacter.Id} at ({targetHex.Q},{targetHex.R})");
+                
+                // Return the game state (battle will be created during turn resolution)
                 return await GetGameStateAsync(gameId, playerId);
             }
 
-            // Move character to the target hex
+            // Move character to the target hex (only happens if the hex is not occupied)
             character.Q = targetHex.Q;
             character.R = targetHex.R;
             character.MovementPoints -= targetHex.TerrainRating > 0 ? 1 : 0; // Moving costs 1 point (minimum)
@@ -1316,7 +1312,10 @@ namespace HexGame.API.Services
             {
                 Console.WriteLine($"All players submitted their turns for turn {game.CurrentTurn}. Resolving end of turn.");
                 
-                // Resolve all battles where both players have submitted
+                // First resolve pending character moves into battles
+                await ResolvePendingMovesAsync(game);
+                
+                // Then resolve all battles where both players have submitted
                 await ResolveSubmittedBattlesAsync(game);
                 
                 // Increment the turn counter
@@ -1393,6 +1392,101 @@ namespace HexGame.API.Services
             }
             
             return effectDescription;
+        }
+
+        private async Task ResolvePendingMovesAsync(Game game)
+        {
+            Console.WriteLine($"Resolving pending character moves for turn {game.CurrentTurn}");
+            
+            // Get all characters with pending moves
+            var charactersWithPendingMoves = game.Players.SelectMany(p => p.Characters)
+                .Where(c => c.PendingMoveTargetQ.HasValue && 
+                            c.PendingMoveTargetR.HasValue && 
+                            !string.IsNullOrEmpty(c.PendingMoveTargetCharacterId))
+                .ToList();
+                
+            Console.WriteLine($"Found {charactersWithPendingMoves.Count} characters with pending moves");
+            
+            // Process each pending move
+            foreach (var character in charactersWithPendingMoves)
+            {
+                try
+                {
+                    // Verify target character still exists
+                    var targetCharacter = game.Players.SelectMany(p => p.Characters)
+                        .FirstOrDefault(c => c.Id == character.PendingMoveTargetCharacterId);
+                    
+                    if (targetCharacter == null)
+                    {
+                        Console.WriteLine($"Target character {character.PendingMoveTargetCharacterId} no longer exists. Canceling pending move.");
+                        // Clear pending move data
+                        character.PendingMoveTargetQ = null;
+                        character.PendingMoveTargetR = null;
+                        character.PendingMoveTargetCharacterId = null;
+                        await _gameRepository.UpdateCharacterAsync(character);
+                        continue;
+                    }
+                    
+                    // Verify target character is still at the expected location
+                    if (targetCharacter.Q != character.PendingMoveTargetQ || 
+                        targetCharacter.R != character.PendingMoveTargetR)
+                    {
+                        Console.WriteLine($"Target character {targetCharacter.Id} is no longer at expected position. Canceling pending move.");
+                        // Clear pending move data
+                        character.PendingMoveTargetQ = null;
+                        character.PendingMoveTargetR = null;
+                        character.PendingMoveTargetCharacterId = null;
+                        await _gameRepository.UpdateCharacterAsync(character);
+                        continue;
+                    }
+
+                    // Create a new battle
+                    Console.WriteLine($"Creating battle between {character.Id} (attacker) and {targetCharacter.Id} (defender)");
+                    
+                    // Get the target hex
+                    var targetHex = game.Hexes.FirstOrDefault(h => h.Q == targetCharacter.Q && h.R == targetCharacter.R);
+                    if (targetHex == null)
+                    {
+                        Console.WriteLine($"Error: Target hex ({targetCharacter.Q}, {targetCharacter.R}) not found. Canceling pending move.");
+                        // Clear pending move data
+                        character.PendingMoveTargetQ = null;
+                        character.PendingMoveTargetR = null;
+                        character.PendingMoveTargetCharacterId = null;
+                        await _gameRepository.UpdateCharacterAsync(character);
+                        continue;
+                    }
+                    
+                    // Create a battle
+                    var battle = new Battle
+                    {
+                        GameId = game.Id,
+                        AttackerCharacterId = character.Id,
+                        DefenderCharacterId = targetCharacter.Id,
+                        HexQ = targetHex.Q,
+                        HexR = targetHex.R,
+                        TerrainBonus = targetHex.TerrainRating,
+                        CurrentPlayerTurn = targetCharacter.PlayerId // Defender chooses battle type first
+                    };
+
+                    await _gameRepository.CreateBattleAsync(battle);
+                    
+                    // Clear pending move data after battle is created
+                    character.PendingMoveTargetQ = null;
+                    character.PendingMoveTargetR = null;
+                    character.PendingMoveTargetCharacterId = null;
+                    await _gameRepository.UpdateCharacterAsync(character);
+                    
+                    Console.WriteLine($"Battle created with ID {battle.Id}");
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Error processing pending move for character {character.Id}: {ex.Message}");
+                    if (ex.InnerException != null)
+                    {
+                        Console.WriteLine($"Inner exception: {ex.InnerException.Message}");
+                    }
+                }
+            }
         }
     }
 

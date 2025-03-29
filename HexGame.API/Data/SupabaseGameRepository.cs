@@ -196,11 +196,17 @@ namespace HexGame.API.Data
             {
                 Console.WriteLine($"Fetching submitted battles for game {gameId}");
                 
-                // Use simpler string-based SQL query instead of the filter API
-                var response = await _client.From<Battle>()
-                    .Where(b => b.GameId == gameId && b.IsCompleted == false 
-                             && b.AttackerSubmitted == true && b.DefenderSubmitted == true)
-                    .Get();
+                // Build the query more carefully, avoiding complex nested conditions
+                // First get battles for this game that aren't completed
+                var query = _client.From<Battle>()
+                    .Filter("game_id", Postgrest.Constants.Operator.Equals, gameId)
+                    .Filter("is_completed", Postgrest.Constants.Operator.Equals, "false");
+                
+                // Then filter for those where both attacker and defender have submitted
+                query = query.Filter("attacker_submitted", Postgrest.Constants.Operator.Equals, true);
+                query = query.Filter("defender_submitted", Postgrest.Constants.Operator.Equals, true);
+                
+                var response = await query.Get();
                 
                 Console.WriteLine($"Found {response.Models.Count()} submitted battles");
                 return response.Models;
