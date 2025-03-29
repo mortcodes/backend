@@ -223,6 +223,39 @@ namespace HexGame.API.Data
                 return new List<Battle>();
             }
         }
+        
+        public async Task<IEnumerable<Battle>> GetPreviousTurnBattlesAsync(string gameId, int currentTurn)
+        {
+            try
+            {
+                Console.WriteLine($"Fetching previous turn battles for game {gameId}, current turn: {currentTurn}");
+                
+                // Get completed battles from the previous turn (currentTurn - 1)
+                int previousTurn = currentTurn - 1;
+                if (previousTurn < 1) return new List<Battle>();
+                
+                var query = _client.From<Battle>()
+                    .Filter("game_id", Postgrest.Constants.Operator.Equals, gameId)
+                    .Filter("is_completed", Postgrest.Constants.Operator.Equals, "true")
+                    .Filter("completed_turn", Postgrest.Constants.Operator.Equals, previousTurn.ToString());
+                
+                var response = await query.Get();
+                
+                Console.WriteLine($"Found {response.Models.Count()} battles from previous turn");
+                return response.Models;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error in GetPreviousTurnBattlesAsync: {ex.Message}");
+                if (ex.InnerException != null)
+                {
+                    Console.WriteLine($"Inner exception: {ex.InnerException.Message}");
+                }
+                
+                // Return empty collection instead of throwing an exception
+                return new List<Battle>();
+            }
+        }
 
         public async Task<IEnumerable<Card>> GetPendingCardsForPlayerAsync(string playerId)
         {
@@ -251,12 +284,33 @@ namespace HexGame.API.Data
 
         public async Task UpdateGameAsync(Game game)
         {
-            // Update the game's timestamps
-            game.UpdatedAt = DateTime.UtcNow;
-
-            await _client.From<Game>()
-                .Where(g => g.Id == game.Id)
-                .Update(game);
+            try
+            {
+                // Update the game's timestamps
+                game.UpdatedAt = DateTime.UtcNow;
+                
+                // Log for debugging
+                Console.WriteLine($"Updating game {game.Id}");
+                Console.WriteLine($"Current turn: {game.CurrentTurn}");
+                Console.WriteLine($"Players who submitted turns: {string.Join(", ", game.SubmittedTurnPlayerIds)}");
+                Console.WriteLine($"Total player count: {game.Players.Count}");
+                
+                // Make sure the update is atomic
+                await _client.From<Game>()
+                    .Where(g => g.Id == game.Id)
+                    .Update(game);
+                
+                Console.WriteLine($"Game {game.Id} updated successfully");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error updating game {game.Id}: {ex.Message}");
+                if (ex.InnerException != null)
+                {
+                    Console.WriteLine($"Inner exception: {ex.InnerException.Message}");
+                }
+                throw;
+            }
         }
 
         public async Task UpdatePlayerAsync(Player player)

@@ -361,21 +361,123 @@ namespace HexGame.API.Services
                 {
                     // Resolve all battles in the working copy
                     var battles = await _gameRepository.GetSubmittedBattlesAsync(gameId);
+                    
                     foreach (var battle in battles)
                     {
                         if (battle.AttackerSubmitted && battle.DefenderSubmitted && !battle.IsCompleted)
                         {
-                            // Process battle cards and update scores in memory
-                            // (Implementation depends on ResolveSubmittedBattlesAsync and ResolveBattleAsync)
-                            // This would be complex to duplicate here, so we'll just issue a warning
-                            Console.WriteLine("Warning: Simulating battle resolution in memory is not implemented.");
+                            Console.WriteLine($"Processing battle {battle.Id} in working copy");
+                            
+                            // Get the attacker and defender characters in the working copy
+                            var attackerChar = workingCopy.Players.SelectMany(p => p.Characters)
+                                .FirstOrDefault(c => c.Id == battle.AttackerCharacterId);
+                            var defenderChar = workingCopy.Players.SelectMany(p => p.Characters)
+                                .FirstOrDefault(c => c.Id == battle.DefenderCharacterId);
+                            
+                            if (attackerChar == null || defenderChar == null)
+                            {
+                                Console.WriteLine($"Warning: Could not find characters for battle {battle.Id} in working copy");
+                                continue;
+                            }
+
+                            // Store initial scores for battle history
+                            int initialAttackerScore = battle.AttackerScore;
+                            int initialDefenderScore = battle.DefenderScore;
+                            
+                            // Process cards played by attacker in memory
+                            List<string> attackerCardEffects = new List<string>();
+                            foreach (var cardId in battle.AttackerCardsPlayed)
+                            {
+                                var card = await _gameRepository.GetCardAsync(cardId);
+                                if (card != null)
+                                {
+                                    // Apply card effects to working battle scores
+                                    var workingBattle = new Battle
+                                    {
+                                        AttackerScore = battle.AttackerScore,
+                                        DefenderScore = battle.DefenderScore,
+                                        TerrainBonus = battle.TerrainBonus,
+                                        BattleType = battle.BattleType,
+                                        AttackerCharacterId = battle.AttackerCharacterId
+                                    };
+                                    
+                                    string effectDescription = ProcessBattleCard(workingBattle, card, attackerChar.PlayerId);
+                                    battle.AttackerScore = workingBattle.AttackerScore;
+                                    battle.DefenderScore = workingBattle.DefenderScore;
+                                    battle.TerrainBonus = workingBattle.TerrainBonus;
+                                    
+                                    if (!string.IsNullOrEmpty(effectDescription))
+                                    {
+                                        attackerCardEffects.Add(effectDescription);
+                                    }
+                                }
+                            }
+                            
+                            // Process cards played by defender in memory
+                            List<string> defenderCardEffects = new List<string>();
+                            foreach (var cardId in battle.DefenderCardsPlayed)
+                            {
+                                var card = await _gameRepository.GetCardAsync(cardId);
+                                if (card != null)
+                                {
+                                    // Apply card effects to working battle scores
+                                    var workingBattle = new Battle
+                                    {
+                                        AttackerScore = battle.AttackerScore,
+                                        DefenderScore = battle.DefenderScore,
+                                        TerrainBonus = battle.TerrainBonus,
+                                        BattleType = battle.BattleType,
+                                        AttackerCharacterId = battle.AttackerCharacterId
+                                    };
+                                    
+                                    string effectDescription = ProcessBattleCard(workingBattle, card, defenderChar.PlayerId);
+                                    battle.AttackerScore = workingBattle.AttackerScore;
+                                    battle.DefenderScore = workingBattle.DefenderScore;
+                                    battle.TerrainBonus = workingBattle.TerrainBonus;
+                                    
+                                    if (!string.IsNullOrEmpty(effectDescription))
+                                    {
+                                        defenderCardEffects.Add(effectDescription);
+                                    }
+                                }
+                            }
+                            
+                            // Determine winner in working copy
+                            bool attackerWins = battle.AttackerScore > battle.DefenderScore;
+                            var winnerId = attackerWins ? 
+                                attackerChar.PlayerId : 
+                                defenderChar.PlayerId;
+                            
+                            // Create battle history to be stored
+                            var battleHistory = new BattleHistoryRecord
+                            {
+                                BattleId = battle.Id,
+                                GameId = battle.GameId,
+                                BattleType = battle.BattleType.ToString(),
+                                AttackerCharacterId = battle.AttackerCharacterId,
+                                DefenderCharacterId = battle.DefenderCharacterId,
+                                InitialAttackerScore = initialAttackerScore,
+                                InitialDefenderScore = initialDefenderScore,
+                                FinalAttackerScore = battle.AttackerScore,
+                                FinalDefenderScore = battle.DefenderScore,
+                                TerrainBonus = battle.TerrainBonus,
+                                AttackerCardEffects = attackerCardEffects,
+                                DefenderCardEffects = defenderCardEffects,
+                                Winner = attackerWins ? "Attacker" : "Defender",
+                                WinnerId = winnerId,
+                                CompletedAt = DateTime.UtcNow
+                            };
+                            
+                            // Store battle history in battle object (serialized as JSON)
+                            battle.BattleHistory = JsonSerializer.Serialize(battleHistory);
+                            
+                            // Set the winner
+                            battle.WinnerId = winnerId;
+                            
+                            // Now resolve the actual battle outcome
+                            await ResolveBattleAsync(game, battle);
                         }
                     }
-                    
-                    // Prepare turn advancement in memory
-                    workingCopy.CurrentTurn++;
-                    workingCopy.SubmittedTurnPlayerIds.Clear();
-                    workingCopy.CurrentPlayerIndex = 0;
                 }
                 
                 // All operations successful in memory, now persist the changes to the database
@@ -746,6 +848,9 @@ namespace HexGame.API.Services
             
             // Get active battle if any
             var activeBattle = _gameRepository.GetActiveBattleAsync(game.Id).GetAwaiter().GetResult();
+            
+            // Get completed battles from previous turn for battle history display
+            var previousTurnBattles = _gameRepository.GetPreviousTurnBattlesAsync(game.Id, game.CurrentTurn).GetAwaiter().GetResult();
 
             // Map models to DTOs
             var playerDto = new PlayerDto
@@ -839,6 +944,24 @@ namespace HexGame.API.Services
                     BattleHistory = activeBattle.BattleHistory
                 };
             }
+            
+            // Create a list of battle DTOs for battles completed in the previous turn
+            var previousTurnBattleDtos = previousTurnBattles.Select(b => new BattleDto
+            {
+                Id = b.Id,
+                GameId = b.GameId,
+                AttackerCharacterId = b.AttackerCharacterId,
+                DefenderCharacterId = b.DefenderCharacterId,
+                HexQ = b.HexQ,
+                HexR = b.HexR,
+                BattleType = b.BattleType,
+                AttackerScore = b.AttackerScore,
+                DefenderScore = b.DefenderScore,
+                TerrainBonus = b.TerrainBonus,
+                WinnerId = b.WinnerId,
+                IsCompleted = b.IsCompleted,
+                BattleHistory = b.BattleHistory
+            }).ToList();
 
             // Check if it's the player's turn
             bool hasSubmittedTurn = game.SubmittedTurnPlayerIds.Contains(player.Id);
@@ -862,6 +985,7 @@ namespace HexGame.API.Services
                 Characters = characterDtos,
                 Hand = playerDto.Hand,
                 ActiveBattle = battleDto,
+                PreviousTurnBattles = previousTurnBattleDtos,
                 IsPlayerTurn = isPlayerTurn,
                 HasPlayerLost = hasPlayerLost,
                 ParticipantPlayerIds = game.ParticipantPlayerIds,
@@ -1060,6 +1184,7 @@ namespace HexGame.API.Services
             
             // Mark battle as completed
             battle.IsCompleted = true;
+            battle.CompletedTurn = game.CurrentTurn;
             await _gameRepository.UpdateBattleAsync(battle);
         }
 
@@ -1207,86 +1332,83 @@ namespace HexGame.API.Services
                         var attacker = game.Players.SelectMany(p => p.Characters).FirstOrDefault(c => c.Id == battle.AttackerCharacterId);
                         var defender = game.Players.SelectMany(p => p.Characters).FirstOrDefault(c => c.Id == battle.DefenderCharacterId);
                         
-                        if (attacker == null || defender == null)
+                        if (attacker != null && defender != null)
                         {
-                            Console.WriteLine($"Warning: Could not find characters for battle {battle.Id}. Skipping battle resolution.");
-                            continue;
-                        }
-                        
-                        // Store initial scores for battle history
-                        int initialAttackerScore = battle.AttackerScore;
-                        int initialDefenderScore = battle.DefenderScore;
-                        
-                        // Process cards played by attacker
-                        List<string> attackerCardEffects = new List<string>();
-                        foreach (var cardId in battle.AttackerCardsPlayed)
-                        {
-                            var card = await _gameRepository.GetCardAsync(cardId);
-                            if (card != null)
+                            // Store initial scores for battle history
+                            int initialAttackerScore = battle.AttackerScore;
+                            int initialDefenderScore = battle.DefenderScore;
+                            
+                            // Process cards played by attacker
+                            List<string> attackerCardEffects = new List<string>();
+                            foreach (var cardId in battle.AttackerCardsPlayed)
                             {
-                                // Apply card effects
-                                string effectDescription = ProcessBattleCard(battle, card, attacker.PlayerId);
-                                if (!string.IsNullOrEmpty(effectDescription))
+                                var card = await _gameRepository.GetCardAsync(cardId);
+                                if (card != null)
                                 {
-                                    attackerCardEffects.Add(effectDescription);
+                                    // Apply card effects
+                                    string effectDescription = ProcessBattleCard(battle, card, attacker.PlayerId);
+                                    if (!string.IsNullOrEmpty(effectDescription))
+                                    {
+                                        attackerCardEffects.Add(effectDescription);
+                                    }
                                 }
                             }
-                        }
-                        
-                        // Process cards played by defender
-                        List<string> defenderCardEffects = new List<string>();
-                        foreach (var cardId in battle.DefenderCardsPlayed)
-                        {
-                            var card = await _gameRepository.GetCardAsync(cardId);
-                            if (card != null)
+                            
+                            // Process cards played by defender
+                            List<string> defenderCardEffects = new List<string>();
+                            foreach (var cardId in battle.DefenderCardsPlayed)
                             {
-                                // Apply card effects
-                                string effectDescription = ProcessBattleCard(battle, card, defender.PlayerId);
-                                if (!string.IsNullOrEmpty(effectDescription))
+                                var card = await _gameRepository.GetCardAsync(cardId);
+                                if (card != null)
                                 {
-                                    defenderCardEffects.Add(effectDescription);
+                                    // Apply card effects
+                                    string effectDescription = ProcessBattleCard(battle, card, defender.PlayerId);
+                                    if (!string.IsNullOrEmpty(effectDescription))
+                                    {
+                                        defenderCardEffects.Add(effectDescription);
+                                    }
                                 }
                             }
+                            
+                            // Determine winner
+                            bool attackerWins = battle.AttackerScore > battle.DefenderScore;
+                            
+                            // Create battle history to be stored
+                            var battleHistory = new BattleHistoryRecord
+                            {
+                                BattleId = battle.Id,
+                                GameId = battle.GameId,
+                                BattleType = battle.BattleType.ToString(),
+                                AttackerCharacterId = battle.AttackerCharacterId,
+                                DefenderCharacterId = battle.DefenderCharacterId,
+                                InitialAttackerScore = initialAttackerScore,
+                                InitialDefenderScore = initialDefenderScore,
+                                FinalAttackerScore = battle.AttackerScore,
+                                FinalDefenderScore = battle.DefenderScore,
+                                TerrainBonus = battle.TerrainBonus,
+                                AttackerCardEffects = attackerCardEffects,
+                                DefenderCardEffects = defenderCardEffects,
+                                Winner = attackerWins ? "Attacker" : "Defender",
+                                WinnerId = attackerWins ? attacker.PlayerId : defender.PlayerId,
+                                CompletedAt = DateTime.UtcNow
+                            };
+                            
+                            // Store battle history in battle object (serialized as JSON)
+                            battle.BattleHistory = JsonSerializer.Serialize(battleHistory);
+                            
+                            // Set the winner
+                            battle.WinnerId = attackerWins ? attacker.PlayerId : defender.PlayerId;
+                            
+                            // Now resolve the actual battle outcome
+                            await ResolveBattleAsync(game, battle);
                         }
-                        
-                        // Determine winner
-                        bool attackerWins = battle.AttackerScore > battle.DefenderScore;
-                        
-                        // Create battle history to be stored
-                        var battleHistory = new BattleHistoryRecord
+                        catch (Exception ex)
                         {
-                            BattleId = battle.Id,
-                            GameId = battle.GameId,
-                            BattleType = battle.BattleType.ToString(),
-                            AttackerCharacterId = battle.AttackerCharacterId,
-                            DefenderCharacterId = battle.DefenderCharacterId,
-                            InitialAttackerScore = initialAttackerScore,
-                            InitialDefenderScore = initialDefenderScore,
-                            FinalAttackerScore = battle.AttackerScore,
-                            FinalDefenderScore = battle.DefenderScore,
-                            TerrainBonus = battle.TerrainBonus,
-                            AttackerCardEffects = attackerCardEffects,
-                            DefenderCardEffects = defenderCardEffects,
-                            Winner = attackerWins ? "Attacker" : "Defender",
-                            WinnerId = attackerWins ? attacker.PlayerId : defender.PlayerId,
-                            CompletedAt = DateTime.UtcNow
-                        };
-                        
-                        // Store battle history in battle object (serialized as JSON)
-                        battle.BattleHistory = JsonSerializer.Serialize(battleHistory);
-                        
-                        // Set the winner
-                        battle.WinnerId = attackerWins ? attacker.PlayerId : defender.PlayerId;
-                        
-                        // Now resolve the actual battle outcome
-                        await ResolveBattleAsync(game, battle);
-                    }
-                    catch (Exception ex)
-                    {
-                        Console.WriteLine($"Error resolving battle {battle.Id}: {ex.Message}");
-                        if (ex.InnerException != null)
-                        {
-                            Console.WriteLine($"Inner exception: {ex.InnerException.Message}");
+                            Console.WriteLine($"Error resolving battle {battle.Id}: {ex.Message}");
+                            if (ex.InnerException != null)
+                            {
+                                Console.WriteLine($"Inner exception: {ex.InnerException.Message}");
+                            }
                         }
                     }
                 }
@@ -1312,25 +1434,40 @@ namespace HexGame.API.Services
             {
                 Console.WriteLine($"All players submitted their turns for turn {game.CurrentTurn}. Resolving end of turn.");
                 
-                // First resolve pending character moves into battles
-                await ResolvePendingMovesAsync(game);
-                
-                // Then resolve all battles where both players have submitted
-                await ResolveSubmittedBattlesAsync(game);
-                
-                // Increment the turn counter
-                game.CurrentTurn++;
-                Console.WriteLine($"Starting new turn {game.CurrentTurn}");
-                
-                // Reset the submitted player list for the new turn
-                game.SubmittedTurnPlayerIds.Clear();
-                
-                // Reset to the first player's turn
-                game.CurrentPlayerIndex = 0;
-                
-                // Update the game state
-                await _gameRepository.UpdateGameAsync(game);
-                return true;
+                try
+                {
+                    // First resolve pending character moves into battles
+                    await ResolvePendingMovesAsync(game);
+                    
+                    // Then resolve all battles where both players have submitted
+                    await ResolveSubmittedBattlesAsync(game);
+                    
+                    // Prepare all game state changes in memory before sending to database
+                    game.CurrentTurn++;
+                    Console.WriteLine($"Starting new turn {game.CurrentTurn}");
+                    
+                    // Reset the submitted player list for the new turn
+                    game.SubmittedTurnPlayerIds.Clear();
+                    Console.WriteLine($"Cleared all submitted turns for new turn {game.CurrentTurn}");
+                    
+                    // Reset to the first player's turn
+                    game.CurrentPlayerIndex = 0;
+                    
+                    // Update the game state in a single atomic operation
+                    await _gameRepository.UpdateGameAsync(game);
+                    
+                    Console.WriteLine($"Game state updated successfully for turn {game.CurrentTurn}");
+                    return true;
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Error resolving end of turn: {ex.Message}");
+                    if (ex.InnerException != null)
+                    {
+                        Console.WriteLine($"Inner exception: {ex.InnerException.Message}");
+                    }
+                    throw; // Rethrow to handle at higher level
+                }
             }
             
             return false;

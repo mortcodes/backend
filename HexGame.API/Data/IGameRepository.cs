@@ -14,6 +14,7 @@ namespace HexGame.API.Data
         Task<Battle?> GetActiveBattleAsync(string gameId);
         Task<IEnumerable<Battle>> GetAllActiveBattlesAsync(string gameId);
         Task<IEnumerable<Battle>> GetSubmittedBattlesAsync(string gameId);
+        Task<IEnumerable<Battle>> GetPreviousTurnBattlesAsync(string gameId, int currentTurn);
         Task<IEnumerable<Card>> GetPendingCardsForPlayerAsync(string playerId);
         Task<Card?> GetCardAsync(string cardId);
         Task UpdateCardAsync(Card card);

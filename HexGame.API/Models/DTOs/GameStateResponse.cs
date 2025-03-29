@@ -13,6 +13,10 @@ namespace HexGame.API.Models.DTOs
         public List<CharacterDto> Characters { get; set; } = new List<CharacterDto>();
         public List<CardDto> Hand { get; set; } = new List<CardDto>();
         public BattleDto? ActiveBattle { get; set; }
+        
+        // Add a list of completed battles from the previous turn to display battle results
+        public List<BattleDto> PreviousTurnBattles { get; set; } = new List<BattleDto>();
+        
         public bool IsPlayerTurn { get; set; }
         public bool HasPlayerLost { get; set; }
         public List<string> ParticipantPlayerIds { get; set; } = new List<string>();

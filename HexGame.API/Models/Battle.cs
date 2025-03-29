@@ -89,6 +89,11 @@ namespace HexGame.API.Models
         [JsonPropertyName("battle_history")]
         [Column("battle_history")]
         public string? BattleHistory { get; set; }
+        
+        // Track which turn this battle was completed in
+        [JsonPropertyName("completed_turn")]
+        [Column("completed_turn")]
+        public int? CompletedTurn { get; set; }
     }
 
     public enum BattleType
